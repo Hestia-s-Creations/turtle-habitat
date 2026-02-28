@@ -1,0 +1,26 @@
+# Core geospatial
+rasterio>=1.3
+rioxarray>=0.15
+xarray>=2024.1
+geopandas>=0.14
+shapely>=2.0
+pyproj>=3.6
+
+# ML / modeling
+scikit-learn>=1.4
+xgboost>=2.0
+numpy>=1.26
+scipy>=1.12
+pandas>=2.2
+
+# Data acquisition
+pygbif>=0.6        # GBIF occurrence API
+requests>=2.31
+
+# Visualization
+matplotlib>=3.8
+seaborn>=0.13
+
+# Utilities
+pyyaml>=6.0
+tqdm>=4.66
