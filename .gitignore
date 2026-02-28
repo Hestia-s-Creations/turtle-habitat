@@ -20,12 +20,12 @@ env/
 *.swo
 
 # Data (large files, download locally)
-data/
-!data/.gitkeep
+/data/
+!/data/.gitkeep
 
 # Results (generated, not tracked)
-results/
-!results/.gitkeep
+/results/
+!/results/.gitkeep
 
 # OS
 .DS_Store
