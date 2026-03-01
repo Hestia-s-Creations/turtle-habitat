@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Download and process USGS 3DEP elevation data for terrain derivatives.
 
 Uses The National Map (TNM) API to download 1/3 arc-second (~10m) DEMs

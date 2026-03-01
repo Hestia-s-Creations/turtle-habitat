@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Download WorldClim bioclimatic variables for the study area.
 
 WorldClim v2.1 provides 19 bioclimatic variables derived from monthly
@@ -22,9 +24,17 @@ from shapely.geometry import box
 
 logger = logging.getLogger(__name__)
 
-# WorldClim v2.1 download URLs (30s resolution = ~1km)
-WORLDCLIM_BASE = "https://biogeo.ucanr.edu/data/worldclim/v2.1/base"
-RESOLUTION = "30s"
+# WorldClim v2.1 download URLs (UC Davis mirror - reliable)
+WORLDCLIM_BASE = "https://geodata.ucdavis.edu/climate/worldclim/2_1/base"
+
+# Available resolutions and approximate pixel sizes
+RESOLUTIONS = {
+    "10m": "~20km",   # 50 MB  - fast test runs
+    "5m": "~10km",    # 180 MB - quick prototyping
+    "2.5m": "~5km",   # 658 MB - standard for SDM literature
+    "30s": "~1km",    # 10 GB  - production / high-res
+}
+RESOLUTION = "10m"  # Default to fast; override with --resolution
 
 # 19 bioclimatic variables
 BIOCLIM_VARS = {
@@ -56,14 +66,14 @@ STUDY_AREAS = {
 }
 
 
-def download_bioclim(output_dir: Path, timeout: int = 300) -> Path:
+def download_bioclim(output_dir: Path, resolution: str = RESOLUTION, timeout: int = 600) -> Path:
     """Download WorldClim bioclimatic variables zip file.
 
     Returns path to the extracted directory.
     """
-    url = f"{WORLDCLIM_BASE}/wc2.1_{RESOLUTION}_bio.zip"
-    zip_path = output_dir / f"wc2.1_{RESOLUTION}_bio.zip"
-    extract_dir = output_dir / "worldclim_raw"
+    url = f"{WORLDCLIM_BASE}/wc2.1_{resolution}_bio.zip"
+    zip_path = output_dir / f"wc2.1_{resolution}_bio.zip"
+    extract_dir = output_dir / f"worldclim_{resolution}"
 
     if extract_dir.exists() and any(extract_dir.glob("*.tif")):
         logger.info(f"WorldClim data already extracted at {extract_dir}")
@@ -209,6 +219,13 @@ def main():
         description="Download WorldClim bioclimatic variables"
     )
     parser.add_argument(
+        "--resolution",
+        choices=list(RESOLUTIONS.keys()),
+        default=RESOLUTION,
+        help=f"Spatial resolution (default: {RESOLUTION}). Options: "
+             + ", ".join(f"{k} ({v})" for k, v in RESOLUTIONS.items()),
+    )
+    parser.add_argument(
         "--variables",
         nargs="+",
         default=None,
@@ -238,7 +255,7 @@ def main():
     bounds = STUDY_AREAS[args.region]
 
     # Download
-    raw_dir = download_bioclim(args.output_dir)
+    raw_dir = download_bioclim(args.output_dir, resolution=args.resolution)
 
     # Clip and stack
     stack_path = build_feature_stack(
@@ -246,6 +263,7 @@ def main():
     )
 
     logger.info(f"\nDone! Feature stack at: {stack_path}")
+    logger.info(f"Resolution: {args.resolution} ({RESOLUTIONS[args.resolution]})")
     logger.info(f"Bounds: {bounds}")
     logger.info(f"Variables: {args.variables or 'all 19'}")
 

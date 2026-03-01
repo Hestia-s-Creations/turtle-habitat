@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Generate habitat suitability maps from trained models.
 
 Reads the bioclim + terrain feature stack, runs the model on every pixel,

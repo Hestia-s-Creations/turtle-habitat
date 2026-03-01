@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Compare model types using spatial block cross-validation.
 
 Runs MaxEnt, Random Forest, and Gradient Boosting on the same data

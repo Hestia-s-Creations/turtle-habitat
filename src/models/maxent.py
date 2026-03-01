@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """MaxEnt species distribution model via scikit-learn.
 
 MaxEnt (Maximum Entropy) is the standard for presence-only species

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Spatial block cross-validation for honest accuracy estimation.
 
 Random train/test splitting inflates accuracy because nearby pixels
