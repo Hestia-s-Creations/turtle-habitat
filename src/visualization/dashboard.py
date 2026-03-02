@@ -737,9 +737,13 @@ controls.onAdd = function() {
             var areaEl = document.getElementById('area-stats');
             if (areaEl) areaEl.style.display = 'none';
             document.getElementById('threshold-marker').style.display = 'none';
+            // Restore suitability raster opacity
+            if (suitOverlay) suitOverlay.setOpacity(parseFloat(sl1.value) / 100);
             return;
         }
         v2.textContent = t.toFixed(2);
+        // Dim suitability raster so threshold classification is primary visual
+        if (suitOverlay) suitOverlay.setOpacity(0.15);
         updateThresholdOverlay(t);
     });
     row2.appendChild(lbl2);
@@ -775,8 +779,11 @@ function updateThresholdOverlay(threshold) {
                 total++;
                 if (val >= threshold) {
                     suitable++;
-                    // Green overlay for suitable areas
-                    d[idx] = 78; d[idx+1] = 204; d[idx+2] = 163; d[idx+3] = 100;
+                    // Bright green for suitable areas
+                    d[idx] = 46; d[idx+1] = 204; d[idx+2] = 113; d[idx+3] = 200;
+                } else {
+                    // Dark mask for unsuitable areas
+                    d[idx] = 10; d[idx+1] = 10; d[idx+2] = 20; d[idx+3] = 160;
                 }
             }
         }
@@ -788,7 +795,7 @@ function updateThresholdOverlay(threshold) {
     if (threshOverlay) {
         threshOverlay.setUrl(uri);
     } else {
-        threshOverlay = L.imageOverlay(uri, BOUNDS, { opacity: 0.7 }).addTo(map);
+        threshOverlay = L.imageOverlay(uri, BOUNDS, { opacity: 0.85 }).addTo(map);
     }
 
     // Update area statistics
