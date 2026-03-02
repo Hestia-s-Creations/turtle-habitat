@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Run the full data acquisition pipeline.
 
 Downloads all data sources, computes features, and assembles
@@ -18,6 +20,7 @@ def run_pipeline(
     n_background: int = 10000,
     include_target_group: bool = True,
     include_terrain: bool = True,
+    resolution: str = "10m",
     verbose: bool = False,
 ):
     """Execute the full data pipeline."""
@@ -88,7 +91,7 @@ def run_pipeline(
     wc_dir.mkdir(parents=True, exist_ok=True)
     bounds = STUDY_AREAS[region]
 
-    raw_dir = download_bioclim(wc_dir)
+    raw_dir = download_bioclim(wc_dir, resolution=resolution)
     stack_path = build_feature_stack(raw_dir, wc_dir, bounds)
 
     # === Step 3: Download terrain (optional) ===
@@ -201,6 +204,12 @@ def main():
         help="Number of background points (default: 10000)",
     )
     parser.add_argument(
+        "--resolution",
+        choices=["10m", "5m", "2.5m", "30s"],
+        default="10m",
+        help="WorldClim resolution (default: 10m). 10m=fast test, 2.5m=real modeling, 30s=production",
+    )
+    parser.add_argument(
         "--skip-target-group",
         action="store_true",
         help="Skip downloading herpetofauna target-group background",
@@ -224,6 +233,7 @@ def main():
         n_background=args.n_background,
         include_target_group=not args.skip_target_group,
         include_terrain=not args.skip_terrain,
+        resolution=args.resolution,
         verbose=args.verbose,
     )
 

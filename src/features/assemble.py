@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Assemble environmental features at occurrence and background points.
 
 Extracts raster values from the bioclim stack and terrain derivatives

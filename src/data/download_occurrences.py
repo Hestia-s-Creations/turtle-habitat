@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Download Western Pond Turtle occurrence records from GBIF.
 
 Uses the GBIF REST API to fetch Actinemys marmorata observations,
