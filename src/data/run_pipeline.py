@@ -101,53 +101,10 @@ def run_pipeline(
         logger.info("STEP 3: Download terrain derivatives")
         logger.info("=" * 60)
 
-        from src.data.download_terrain import (
-            STUDY_AREAS as TERRAIN_STUDY_AREAS,
-            compute_aspect,
-            compute_slope,
-            compute_twi,
-            download_dem_tile,
-            merge_tiles,
-            resample_to_target,
-            search_dem_tiles,
-        )
+        from src.data.download_terrain import compute_terrain_features
 
         terrain_dir = data_dir / "terrain"
-        terrain_dir.mkdir(parents=True, exist_ok=True)
-        tiles_dir = terrain_dir / "tiles"
-        tiles_dir.mkdir(exist_ok=True)
-
-        items = search_dem_tiles(bounds)
-        tile_paths = []
-        for item in items:
-            url = item.get("downloadURL")
-            if not url:
-                continue
-            name = Path(url).name
-            tile_path = tiles_dir / name
-            download_dem_tile(url, tile_path)
-            tile_paths.append(tile_path)
-
-        if tile_paths:
-            dem_path = terrain_dir / "dem_merged.tif"
-            merge_tiles(tile_paths, dem_path)
-
-            slope_path = terrain_dir / "slope.tif"
-            aspect_path = terrain_dir / "aspect.tif"
-            twi_path = terrain_dir / "twi.tif"
-
-            compute_slope(dem_path, slope_path)
-            compute_aspect(dem_path, aspect_path)
-            compute_twi(dem_path, slope_path, twi_path)
-
-            # Resample to WorldClim grid
-            resampled_dir = terrain_dir / "resampled"
-            resampled_dir.mkdir(exist_ok=True)
-            for tname, tpath in [("slope", slope_path), ("aspect", aspect_path), ("twi", twi_path)]:
-                resample_to_target(tpath, stack_path, resampled_dir / f"{tname}_resampled.tif")
-        else:
-            logger.warning("No DEM tiles found - skipping terrain features")
-            terrain_dir = None
+        compute_terrain_features(terrain_dir, bounds, resolution=resolution)
 
     # === Step 4: Assemble training data ===
     logger.info("\n" + "=" * 60)

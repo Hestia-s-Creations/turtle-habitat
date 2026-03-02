@@ -1,100 +1,119 @@
 from __future__ import annotations
 
-"""Download and process USGS 3DEP elevation data for terrain derivatives.
+"""Download elevation data and compute terrain derivatives for habitat modeling.
 
-Uses The National Map (TNM) API to download 1/3 arc-second (~10m) DEMs
-for the study area, then computes slope, aspect, and Topographic Wetness
-Index (TWI) as additional environmental features for habitat modeling.
+Downloads WorldClim-matched elevation data (same resolution and grid as the
+bioclim variables), then computes slope, aspect, and Topographic Wetness
+Index (TWI) as additional environmental features.
 
 For the turtle model, terrain features capture microhabitat preferences:
 - Low slope near water (basking sites)
 - TWI for wetness/proximity to water
 - Aspect for solar exposure (thermoregulation)
 
-Data source: https://apps.nationalmap.gov/tnmaccess/
+Primary source: WorldClim elevation (matched to bioclim grid)
+Fallback: USGS 3DEP via The National Map API
 """
 
 import argparse
 import logging
+import zipfile
 from pathlib import Path
 
 import numpy as np
 import rasterio
-from rasterio.merge import merge
-from rasterio.warp import calculate_default_transform, reproject, Resampling
+from rasterio.mask import mask as rasterio_mask
+from rasterio.warp import reproject, Resampling
 import requests
+from shapely.geometry import box
 
 logger = logging.getLogger(__name__)
 
-# TNM API endpoint
+# WorldClim elevation URL (same grid as bioclim variables — no resampling needed)
+WORLDCLIM_ELEV_BASE = "https://geodata.ucdavis.edu/climate/worldclim/2_1/base"
+
+# Fallback: TNM API endpoint for high-res DEM
 TNM_API = "https://tnmaccess.nationalmap.gov/api/v1/products"
 
-# Study areas
+# Study areas (west, south, east, north)
 STUDY_AREAS = {
     "oregon": (-124.6, 41.9, -116.5, 46.3),
     "pnw": (-125.0, 41.0, -116.0, 49.0),
 }
 
-
-def search_dem_tiles(bounds: tuple[float, float, float, float]) -> list[dict]:
-    """Search TNM API for 1/3 arc-second DEM tiles covering the study area."""
-    west, south, east, north = bounds
-    params = {
-        "datasets": "National Elevation Dataset (NED) 1/3 arc-second",
-        "bbox": f"{west},{south},{east},{north}",
-        "prodFormats": "GeoTIFF",
-        "max": 100,
-    }
-
-    logger.info(f"Searching TNM for DEM tiles in {bounds}")
-    resp = requests.get(TNM_API, params=params)
-    resp.raise_for_status()
-    data = resp.json()
-
-    items = data.get("items", [])
-    logger.info(f"  Found {len(items)} DEM tiles")
-    return items
+RESOLUTIONS = {
+    "10m": "~20km",
+    "5m": "~10km",
+    "2.5m": "~5km",
+    "30s": "~1km",
+}
 
 
-def download_dem_tile(url: str, output_path: Path, timeout: int = 300) -> None:
-    """Download a single DEM tile."""
-    if output_path.exists():
-        logger.debug(f"  Tile already cached: {output_path.name}")
-        return
+def download_worldclim_elev(
+    output_dir: Path,
+    resolution: str = "2.5m",
+    bounds: tuple[float, float, float, float] | None = None,
+    timeout: int = 600,
+) -> Path:
+    """Download WorldClim elevation at matching resolution and clip to bounds.
 
-    logger.info(f"  Downloading {output_path.name}")
-    resp = requests.get(url, stream=True, timeout=timeout)
-    resp.raise_for_status()
+    Returns path to the clipped elevation GeoTIFF.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    clipped_path = output_dir / f"elevation_{resolution}.tif"
 
-    with open(output_path, "wb") as f:
-        for chunk in resp.iter_content(chunk_size=8192):
-            f.write(chunk)
+    if clipped_path.exists():
+        logger.info(f"Elevation already exists: {clipped_path}")
+        return clipped_path
 
+    url = f"{WORLDCLIM_ELEV_BASE}/wc2.1_{resolution}_elev.zip"
+    zip_path = output_dir / f"wc2.1_{resolution}_elev.zip"
+    extract_dir = output_dir / f"elev_{resolution}"
 
-def merge_tiles(tile_paths: list[Path], output_path: Path) -> None:
-    """Merge multiple DEM tiles into a single raster."""
-    if output_path.exists():
-        logger.info(f"  Merged DEM already exists: {output_path}")
-        return
+    # Download
+    if not zip_path.exists():
+        logger.info(f"Downloading WorldClim elevation ({resolution})")
+        resp = requests.get(url, stream=True, timeout=timeout)
+        resp.raise_for_status()
+        with open(zip_path, "wb") as f:
+            for chunk in resp.iter_content(chunk_size=65536):
+                f.write(chunk)
+        logger.info(f"  Downloaded: {zip_path}")
 
-    logger.info(f"Merging {len(tile_paths)} tiles")
-    datasets = [rasterio.open(p) for p in tile_paths]
+    # Extract
+    if not extract_dir.exists():
+        logger.info(f"Extracting elevation data")
+        with zipfile.ZipFile(zip_path) as zf:
+            zf.extractall(extract_dir)
 
-    mosaic, transform = merge(datasets)
-    profile = datasets[0].profile.copy()
-    profile.update({
-        "height": mosaic.shape[1],
-        "width": mosaic.shape[2],
-        "transform": transform,
-    })
+    # Find the tif
+    tif_files = list(extract_dir.glob("*.tif"))
+    if not tif_files:
+        raise FileNotFoundError(f"No TIF found in {extract_dir}")
+    elev_tif = tif_files[0]
 
-    with rasterio.open(output_path, "w", **profile) as dst:
-        dst.write(mosaic)
+    # Clip to bounds if provided
+    if bounds:
+        west, south, east, north = bounds
+        geom = box(west, south, east, north)
 
-    for ds in datasets:
-        ds.close()
+        with rasterio.open(elev_tif) as src:
+            clipped, transform = rasterio_mask(src, [geom], crop=True)
+            profile = src.profile.copy()
+            profile.update({
+                "height": clipped.shape[1],
+                "width": clipped.shape[2],
+                "transform": transform,
+            })
 
-    logger.info(f"  Merged DEM saved: {output_path}")
+        with rasterio.open(clipped_path, "w", **profile) as dst:
+            dst.write(clipped)
+        logger.info(f"  Clipped elevation: {clipped_path} ({clipped.shape[2]}x{clipped.shape[1]})")
+    else:
+        import shutil
+        shutil.copy2(elev_tif, clipped_path)
+
+    return clipped_path
 
 
 def compute_slope(dem_path: Path, output_path: Path) -> None:
@@ -248,21 +267,54 @@ def resample_to_target(
     logger.info(f"  Resampled to target grid: {output_path}")
 
 
+def compute_terrain_features(
+    output_dir: Path,
+    bounds: tuple[float, float, float, float],
+    resolution: str = "2.5m",
+) -> Path:
+    """Download elevation and compute all terrain derivatives.
+
+    Returns the output directory containing slope.tif, aspect.tif, twi.tif
+    all on the same grid as WorldClim bioclim variables.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Download WorldClim elevation (same grid as bioclim — no resampling!)
+    dem_path = download_worldclim_elev(output_dir, resolution=resolution, bounds=bounds)
+
+    # Compute derivatives
+    slope_path = output_dir / "slope.tif"
+    aspect_path = output_dir / "aspect.tif"
+    twi_path = output_dir / "twi.tif"
+
+    compute_slope(dem_path, slope_path)
+    compute_aspect(dem_path, aspect_path)
+    compute_twi(dem_path, slope_path, twi_path)
+
+    logger.info(f"\nTerrain features computed:")
+    logger.info(f"  Elevation: {dem_path}")
+    logger.info(f"  Slope: {slope_path}")
+    logger.info(f"  Aspect: {aspect_path}")
+    logger.info(f"  TWI: {twi_path}")
+
+    return output_dir
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Download USGS 3DEP DEM and compute terrain derivatives"
+        description="Download elevation data and compute terrain derivatives"
     )
     parser.add_argument(
         "--region",
         choices=["oregon", "pnw"],
-        default="oregon",
-        help="Study area (default: oregon)",
+        default="pnw",
+        help="Study area (default: pnw)",
     )
     parser.add_argument(
-        "--resample-to",
-        type=Path,
-        default=None,
-        help="Path to target raster (e.g., WorldClim stack) to resample terrain to",
+        "--resolution",
+        choices=list(RESOLUTIONS.keys()),
+        default="2.5m",
+        help="Resolution matching WorldClim bioclim (default: 2.5m)",
     )
     parser.add_argument(
         "--output-dir",
@@ -278,57 +330,8 @@ def main():
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
-    args.output_dir.mkdir(parents=True, exist_ok=True)
     bounds = STUDY_AREAS[args.region]
-    tiles_dir = args.output_dir / "tiles"
-    tiles_dir.mkdir(exist_ok=True)
-
-    # Search and download tiles
-    items = search_dem_tiles(bounds)
-    tile_paths = []
-    for item in items:
-        url = item.get("downloadURL")
-        if not url:
-            continue
-        name = Path(url).name
-        tile_path = tiles_dir / name
-        download_dem_tile(url, tile_path)
-        tile_paths.append(tile_path)
-
-    if not tile_paths:
-        logger.error("No DEM tiles downloaded!")
-        return
-
-    # Merge
-    dem_path = args.output_dir / "dem_merged.tif"
-    merge_tiles(tile_paths, dem_path)
-
-    # Compute derivatives
-    slope_path = args.output_dir / "slope.tif"
-    aspect_path = args.output_dir / "aspect.tif"
-    twi_path = args.output_dir / "twi.tif"
-
-    compute_slope(dem_path, slope_path)
-    compute_aspect(dem_path, aspect_path)
-    compute_twi(dem_path, slope_path, twi_path)
-
-    # Optionally resample to match WorldClim grid
-    if args.resample_to:
-        resampled_dir = args.output_dir / "resampled"
-        resampled_dir.mkdir(exist_ok=True)
-
-        for name, path in [("slope", slope_path), ("aspect", aspect_path), ("twi", twi_path)]:
-            resample_to_target(
-                path,
-                args.resample_to,
-                resampled_dir / f"{name}_resampled.tif",
-            )
-
-    logger.info("\nDone! Terrain derivatives computed.")
-    logger.info(f"  DEM: {dem_path}")
-    logger.info(f"  Slope: {slope_path}")
-    logger.info(f"  Aspect: {aspect_path}")
-    logger.info(f"  TWI: {twi_path}")
+    compute_terrain_features(args.output_dir, bounds, resolution=args.resolution)
 
 
 if __name__ == "__main__":
