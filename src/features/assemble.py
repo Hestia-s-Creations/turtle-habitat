@@ -15,6 +15,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import rasterio
+from scipy import stats
 
 logger = logging.getLogger(__name__)
 
@@ -131,6 +132,121 @@ def generate_target_group_background(
     return df["longitude"].values, df["latitude"].values
 
 
+def select_features(
+    df: pd.DataFrame,
+    feature_cols: list[str],
+    corr_threshold: float = 0.7,
+    vif_threshold: float = 10.0,
+    output_dir: Path | None = None,
+) -> list[str]:
+    """Select features by removing collinear variables.
+
+    Two-stage filtering:
+    1. Pearson correlation — drop one of any pair with |r| > corr_threshold
+    2. Variance Inflation Factor (VIF) — iteratively drop features with VIF > vif_threshold
+
+    Returns the list of retained feature names.
+    """
+    X = df[feature_cols].dropna()
+    if X.empty:
+        logger.warning("No complete cases for feature selection, keeping all features")
+        return feature_cols
+
+    # Stage 1: Correlation filtering
+    corr_matrix = X.corr().abs()
+    retained = list(feature_cols)
+    dropped_corr = []
+
+    upper_tri = corr_matrix.where(
+        np.triu(np.ones(corr_matrix.shape, dtype=bool), k=1)
+    )
+    for col in upper_tri.columns:
+        if col not in retained:
+            continue
+        correlated = upper_tri.index[upper_tri[col] > corr_threshold].tolist()
+        for drop_col in correlated:
+            if drop_col in retained:
+                retained.remove(drop_col)
+                dropped_corr.append((drop_col, col, corr_matrix.loc[drop_col, col]))
+                logger.info(
+                    f"  Dropped {drop_col} (|r|={corr_matrix.loc[drop_col, col]:.3f} with {col})"
+                )
+
+    logger.info(f"Correlation filter: {len(feature_cols)} -> {len(retained)} features")
+
+    # Stage 2: VIF filtering
+    dropped_vif = []
+    while len(retained) > 1:
+        X_vif = X[retained].values
+        # Add intercept for VIF calculation
+        X_with_const = np.column_stack([np.ones(len(X_vif)), X_vif])
+
+        vifs = []
+        for i in range(len(retained)):
+            # VIF = 1 / (1 - R^2) from regressing feature i on all others
+            col_idx = i + 1  # +1 for intercept
+            others = [j for j in range(X_with_const.shape[1]) if j != col_idx]
+            X_others = X_with_const[:, others]
+            y_col = X_with_const[:, col_idx]
+
+            try:
+                # Use least squares instead of full OLS
+                coeffs, residuals, _, _ = np.linalg.lstsq(X_others, y_col, rcond=None)
+                y_hat = X_others @ coeffs
+                ss_res = np.sum((y_col - y_hat) ** 2)
+                ss_tot = np.sum((y_col - y_col.mean()) ** 2)
+                r_squared = 1 - ss_res / ss_tot if ss_tot > 0 else 0
+                vif = 1 / (1 - r_squared) if r_squared < 1 else float("inf")
+            except np.linalg.LinAlgError:
+                vif = float("inf")
+            vifs.append(vif)
+
+        max_vif_idx = np.argmax(vifs)
+        max_vif = vifs[max_vif_idx]
+
+        if max_vif <= vif_threshold:
+            break
+
+        drop_name = retained[max_vif_idx]
+        dropped_vif.append((drop_name, max_vif))
+        logger.info(f"  Dropped {drop_name} (VIF={max_vif:.1f})")
+        retained.pop(max_vif_idx)
+
+    logger.info(f"VIF filter: {len(retained)} features retained")
+    logger.info(f"Final features: {retained}")
+
+    # Save selection report
+    if output_dir:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        report_path = output_dir / "feature_selection_report.txt"
+        with open(report_path, "w") as f:
+            f.write("Feature Selection Report\n")
+            f.write("=" * 50 + "\n\n")
+            f.write(f"Initial features: {len(feature_cols)}\n")
+            f.write(f"After correlation filter (|r| > {corr_threshold}): "
+                    f"{len(feature_cols) - len(dropped_corr)}\n")
+            f.write(f"After VIF filter (VIF > {vif_threshold}): {len(retained)}\n\n")
+
+            if dropped_corr:
+                f.write("Dropped by correlation:\n")
+                for name, partner, r in dropped_corr:
+                    f.write(f"  {name} (|r|={r:.3f} with {partner})\n")
+                f.write("\n")
+
+            if dropped_vif:
+                f.write("Dropped by VIF:\n")
+                for name, vif in dropped_vif:
+                    f.write(f"  {name} (VIF={vif:.1f})\n")
+                f.write("\n")
+
+            f.write("Retained features:\n")
+            for name in retained:
+                f.write(f"  {name}\n")
+        logger.info(f"Feature selection report saved to {report_path}")
+
+    return retained
+
+
 def assemble_training_data(
     occurrence_csv: Path,
     bioclim_stack: Path,
@@ -138,6 +254,9 @@ def assemble_training_data(
     background_csv: Path | None = None,
     n_background: int = 10000,
     output_path: Path | None = None,
+    run_feature_selection: bool = False,
+    corr_threshold: float = 0.7,
+    vif_threshold: float = 10.0,
 ) -> pd.DataFrame:
     """Build the full training dataset.
 
@@ -220,6 +339,20 @@ def assemble_training_data(
     if len(result) < before:
         logger.info(f"Dropped {before - len(result)} points outside raster extent")
 
+    # Feature selection (VIF + correlation filtering)
+    if run_feature_selection:
+        report_dir = output_path.parent if output_path else None
+        selected = select_features(
+            result, feature_cols,
+            corr_threshold=corr_threshold,
+            vif_threshold=vif_threshold,
+            output_dir=report_dir,
+        )
+        drop_cols = [c for c in feature_cols if c not in selected]
+        if drop_cols:
+            result = result.drop(columns=drop_cols)
+            feature_cols = selected
+
     logger.info(f"\n=== Training data ===")
     logger.info(f"Presence points: {(result['presence'] == 1).sum()}")
     logger.info(f"Background points: {(result['presence'] == 0).sum()}")
@@ -275,6 +408,23 @@ def main():
         default=Path("data/training/features.csv"),
         help="Output CSV path (default: data/training/features.csv)",
     )
+    parser.add_argument(
+        "--select-features",
+        action="store_true",
+        help="Run VIF + correlation feature selection to remove collinear variables",
+    )
+    parser.add_argument(
+        "--corr-threshold",
+        type=float,
+        default=0.7,
+        help="Correlation threshold for feature selection (default: 0.7)",
+    )
+    parser.add_argument(
+        "--vif-threshold",
+        type=float,
+        default=10.0,
+        help="VIF threshold for feature selection (default: 10.0)",
+    )
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -290,6 +440,9 @@ def main():
         background_csv=args.background_csv,
         n_background=args.n_background,
         output_path=args.output,
+        run_feature_selection=args.select_features,
+        corr_threshold=args.corr_threshold,
+        vif_threshold=args.vif_threshold,
     )
 
 
