@@ -24,13 +24,16 @@ logger = logging.getLogger(__name__)
 
 def assign_spatial_blocks(
     df: pd.DataFrame,
-    n_blocks_x: int = 3,
-    n_blocks_y: int = 3,
+    n_blocks_x: int = 4,
+    n_blocks_y: int = 5,
+    n_folds: int = 5,
+    min_presence_per_fold: int = 5,
 ) -> pd.DataFrame:
-    """Assign each point to a spatial block based on geographic position.
+    """Assign each point to a spatial block with balanced fold distribution.
 
-    Divides the study area into a grid of n_blocks_x * n_blocks_y blocks
-    and assigns each point a fold number (0 to n_folds-1).
+    Uses a 4x5 grid (20 blocks) assigned to 5 folds (4 blocks each) for
+    even spatial coverage. Validates that each fold has sufficient presence
+    points before returning.
     """
     df = df.copy()
 
@@ -49,25 +52,63 @@ def assign_spatial_blocks(
     block_x = ((df["longitude"] - lon_min) / block_width).astype(int).clip(0, n_blocks_x - 1)
     block_y = ((df["latitude"] - lat_min) / block_height).astype(int).clip(0, n_blocks_y - 1)
 
-    # Assign block index, then map to folds
     block_id = block_y * n_blocks_x + block_x
     n_blocks = n_blocks_x * n_blocks_y
 
-    # Use checkerboard pattern for fold assignment (better spatial separation)
-    fold_map = {}
-    n_folds = 5
+    # Balanced fold assignment: distribute blocks evenly across folds
+    # Sort blocks by checkerboard order for spatial separation, then round-robin assign
+    blocks_ordered = []
     for bx in range(n_blocks_x):
         for by in range(n_blocks_y):
             bid = by * n_blocks_x + bx
-            fold_map[bid] = (bx + by) % n_folds
+            # Checkerboard ordering ensures spatially separated blocks go to same fold
+            blocks_ordered.append((bid, (bx + by) % 2, bx, by))
+
+    # Sort by checkerboard group, then position for consistent assignment
+    blocks_ordered.sort(key=lambda t: (t[1], t[2], t[3]))
+
+    # Round-robin assignment ensures exactly n_blocks/n_folds blocks per fold
+    fold_map = {}
+    for i, (bid, _, _, _) in enumerate(blocks_ordered):
+        fold_map[bid] = i % n_folds
 
     df["fold"] = block_id.map(fold_map)
 
-    # Log fold distribution
-    for fold in sorted(df["fold"].unique()):
-        n_pres = (df.loc[df["fold"] == fold, "presence"] == 1).sum()
-        n_bg = (df.loc[df["fold"] == fold, "presence"] == 0).sum()
-        logger.info(f"  Fold {fold}: {n_pres} presence, {n_bg} background")
+    # Pre-flight check: validate fold sizes
+    fold_sizes = []
+    for fold in range(n_folds):
+        fold_mask = df["fold"] == fold
+        n_pres = (df.loc[fold_mask, "presence"] == 1).sum()
+        n_bg = (df.loc[fold_mask, "presence"] == 0).sum()
+        n_blocks_in_fold = sum(1 for v in fold_map.values() if v == fold)
+        fold_sizes.append({
+            "fold": fold, "presence": n_pres, "background": n_bg,
+            "total": n_pres + n_bg, "blocks": n_blocks_in_fold,
+        })
+        logger.info(
+            f"  Fold {fold}: {n_pres} presence, {n_bg} background "
+            f"({n_blocks_in_fold} blocks)"
+        )
+
+    # Check minimum presence per fold
+    low_folds = [s for s in fold_sizes if s["presence"] < min_presence_per_fold]
+    if low_folds:
+        for s in low_folds:
+            logger.warning(
+                f"  WARNING: Fold {s['fold']} has only {s['presence']} presence "
+                f"points (minimum {min_presence_per_fold})"
+            )
+
+    # Check fold balance (within 20% of mean)
+    totals = [s["total"] for s in fold_sizes]
+    mean_total = np.mean(totals)
+    for s in fold_sizes:
+        deviation = abs(s["total"] - mean_total) / mean_total
+        if deviation > 0.20:
+            logger.warning(
+                f"  WARNING: Fold {s['fold']} size ({s['total']}) deviates "
+                f"{deviation:.0%} from mean ({mean_total:.0f})"
+            )
 
     return df
 
@@ -122,8 +163,8 @@ def evaluate_fold(
 def run_spatial_cv(
     df: pd.DataFrame,
     model_type: str = "maxent",
-    n_blocks_x: int = 3,
-    n_blocks_y: int = 3,
+    n_blocks_x: int = 4,
+    n_blocks_y: int = 5,
 ) -> dict:
     """Run spatial block cross-validation.
 
@@ -198,6 +239,8 @@ def run_spatial_cv(
         "mean_sensitivity": fold_df["sensitivity"].mean(),
         "mean_specificity": fold_df["specificity"].mean(),
         "n_folds": len(fold_results),
+        "n_folds_skipped": len(folds) - len(fold_results),
+        "grid_size": f"{n_blocks_x}x{n_blocks_y}",
         "model_type": model_type,
     }
 
@@ -230,8 +273,8 @@ def main():
     )
     parser.add_argument("--training-data", type=Path, required=True)
     parser.add_argument("--model-type", choices=["maxent", "rf", "gbm"], default="maxent")
-    parser.add_argument("--blocks-x", type=int, default=3)
-    parser.add_argument("--blocks-y", type=int, default=3)
+    parser.add_argument("--blocks-x", type=int, default=4)
+    parser.add_argument("--blocks-y", type=int, default=5)
     parser.add_argument("--output", type=Path, default=Path("results/cv_results.json"))
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
