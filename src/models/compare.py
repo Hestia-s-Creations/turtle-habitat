@@ -11,10 +11,12 @@ import json
 import logging
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from src.evaluation.spatial_cv import run_spatial_cv
 from src.models.maxent import get_feature_cols, train_model, save_model, variable_importance
+from src.visualization.response_curves import generate_response_curves
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +87,20 @@ def compare_models(
     logger.info(f"\nTop 10 features:")
     for _, row in importance.head(10).iterrows():
         logger.info(f"  {row['feature']}: {row['importance']:.4f}")
+
+    # Generate response curves for ecological validation
+    logger.info(f"\nGenerating response curves...")
+    X = df[feature_cols].values
+    X = np.nan_to_num(X, nan=np.nanmedian(X, axis=0))
+    curve_results = generate_response_curves(
+        final_model, X, feature_cols, output_dir,
+        top_n=10, importance=importance,
+    )
+    warnings = [r for r in curve_results if "warning" in r]
+    if warnings:
+        logger.warning(f"\n{len(warnings)} features have monotonic responses:")
+        for w in warnings:
+            logger.warning(f"  {w['feature']}: {w['warning']}")
 
     return comparison
 
