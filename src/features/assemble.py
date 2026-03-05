@@ -311,7 +311,7 @@ def assemble_training_data(
     # Sample terrain features
     terrain_dfs = []
     if terrain_dir and terrain_dir.exists():
-        for name in ["slope", "aspect", "twi"]:
+        for name in ["slope", "aspect", "twi", "tpi"]:
             # Check for resampled version first
             resampled = terrain_dir / "resampled" / f"{name}_resampled.tif"
             native = terrain_dir / f"{name}.tif"
