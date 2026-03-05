@@ -17,7 +17,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from sklearn.metrics import roc_auc_score, roc_curve
+from sklearn.metrics import roc_auc_score, roc_curve, cohen_kappa_score
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +88,72 @@ def compute_tss(y_true: np.ndarray, y_prob: np.ndarray) -> tuple[float, float]:
     return tss_values[best_idx], thresholds[best_idx]
 
 
+def compute_kappa_threshold(y_true: np.ndarray, y_prob: np.ndarray) -> tuple[float, float]:
+    """Find threshold maximizing Cohen's Kappa, which accounts for chance agreement.
+
+    Returns (kappa, optimal_threshold).
+    """
+    fpr, tpr, thresholds = roc_curve(y_true, y_prob)
+    best_kappa = -1.0
+    best_thresh = 0.5
+
+    for thresh in thresholds:
+        y_pred = (y_prob >= thresh).astype(int)
+        kappa = cohen_kappa_score(y_true, y_pred)
+        if kappa > best_kappa:
+            best_kappa = kappa
+            best_thresh = thresh
+
+    return best_kappa, best_thresh
+
+
+def equal_sensitivity_specificity_threshold(
+    y_true: np.ndarray, y_prob: np.ndarray
+) -> float:
+    """Find threshold where sensitivity equals specificity.
+
+    Produces balanced predictions — more conservative than max-TSS.
+    """
+    fpr, tpr, thresholds = roc_curve(y_true, y_prob)
+    specificity = 1 - fpr
+    # Find where |sensitivity - specificity| is minimized
+    diff = np.abs(tpr - specificity)
+    best_idx = np.argmin(diff)
+    return thresholds[best_idx]
+
+
+def prevalence_adjusted_threshold(
+    y_true: np.ndarray, y_prob: np.ndarray
+) -> float:
+    """Compute prevalence-adjusted threshold.
+
+    Scales the base threshold by log(prevalence) to account for
+    imbalanced presence:background ratios.
+    """
+    prevalence = y_true.sum() / len(y_true)
+    _, base_threshold = compute_tss(y_true, y_prob)
+    # Adjust: lower prevalence -> lower threshold (more permissive)
+    adjustment = np.log(prevalence) / np.log(0.5)  # normalized to 1.0 at 50% prevalence
+    return base_threshold * adjustment
+
+
+def compute_all_thresholds(
+    y_true: np.ndarray, y_prob: np.ndarray
+) -> dict[str, float]:
+    """Compute all threshold methods and return as dict."""
+    _, tss_thresh = compute_tss(y_true, y_prob)
+    _, kappa_thresh = compute_kappa_threshold(y_true, y_prob)
+    equal_ss_thresh = equal_sensitivity_specificity_threshold(y_true, y_prob)
+    prev_thresh = prevalence_adjusted_threshold(y_true, y_prob)
+
+    return {
+        "max_tss": tss_thresh,
+        "max_kappa": kappa_thresh,
+        "equal_sens_spec": equal_ss_thresh,
+        "prevalence_adjusted": prev_thresh,
+    }
+
+
 def evaluate_fold(
     y_true: np.ndarray,
     y_prob: np.ndarray,
@@ -96,7 +162,7 @@ def evaluate_fold(
     auc = roc_auc_score(y_true, y_prob)
     tss, threshold = compute_tss(y_true, y_prob)
 
-    # Binary predictions at optimal threshold
+    # Binary predictions at optimal TSS threshold
     y_pred = (y_prob >= threshold).astype(int)
     tp = ((y_pred == 1) & (y_true == 1)).sum()
     tn = ((y_pred == 0) & (y_true == 0)).sum()
@@ -105,6 +171,9 @@ def evaluate_fold(
 
     sensitivity = tp / (tp + fn) if (tp + fn) > 0 else 0
     specificity = tn / (tn + fp) if (tn + fp) > 0 else 0
+
+    # Compute all threshold methods
+    all_thresholds = compute_all_thresholds(y_true, y_prob)
 
     return {
         "auc": auc,
@@ -116,6 +185,7 @@ def evaluate_fold(
         "tn": int(tn),
         "fp": int(fp),
         "fn": int(fn),
+        "thresholds": all_thresholds,
     }
 
 
