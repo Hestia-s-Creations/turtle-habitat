@@ -98,9 +98,73 @@ MODEL_BUILDERS = {
 }
 
 
+def impute_with_tracking(
+    X: np.ndarray,
+    feature_cols: list[str],
+    results_dir: Path | None = None,
+) -> np.ndarray:
+    """Replace NaN values with column medians, tracking what was imputed.
+
+    Logs per-feature NaN counts, warns if any feature exceeds 10% NaN
+    or any sample exceeds 30% NaN features. Saves imputation report
+    to results directory if provided.
+    """
+    nan_mask = np.isnan(X)
+    n_samples, n_features = X.shape
+    report_lines = []
+
+    # Per-feature NaN counts
+    nan_per_feature = nan_mask.sum(axis=0)
+    for i, (col, count) in enumerate(zip(feature_cols, nan_per_feature)):
+        pct = count / n_samples * 100
+        if count > 0:
+            msg = f"  {col}: {count} NaN ({pct:.1f}%)"
+            logger.info(msg)
+            report_lines.append(msg)
+        if pct > 10:
+            logger.warning(f"  WARNING: {col} has {pct:.1f}% NaN values (>10% threshold)")
+
+    # Per-sample NaN counts
+    nan_per_sample = nan_mask.sum(axis=1)
+    high_nan_samples = (nan_per_sample > 0.3 * n_features).sum()
+    if high_nan_samples > 0:
+        logger.warning(
+            f"  WARNING: {high_nan_samples} samples have >30% NaN features — consider dropping"
+        )
+
+    total_nan = nan_mask.sum()
+    total_cells = n_samples * n_features
+    logger.info(
+        f"  Imputation summary: {total_nan}/{total_cells} cells "
+        f"({total_nan / total_cells * 100:.2f}%) replaced with column medians"
+    )
+
+    # Save report
+    if results_dir and report_lines:
+        results_dir.mkdir(parents=True, exist_ok=True)
+        report_path = results_dir / "imputation_report.txt"
+        with open(report_path, "w") as f:
+            f.write("NaN Imputation Report\n")
+            f.write("=" * 40 + "\n")
+            f.write(f"Total samples: {n_samples}\n")
+            f.write(f"Total features: {n_features}\n")
+            f.write(f"Total NaN cells: {total_nan} ({total_nan / total_cells * 100:.2f}%)\n")
+            f.write(f"Samples with >30% NaN: {high_nan_samples}\n\n")
+            f.write("Per-feature NaN counts:\n")
+            for line in report_lines:
+                f.write(line + "\n")
+        logger.info(f"  Imputation report saved to {report_path}")
+
+    # Impute with column medians
+    medians = np.nanmedian(X, axis=0)
+    X = np.nan_to_num(X, nan=medians)
+    return X
+
+
 def train_model(
     train_df: pd.DataFrame,
     model_type: str = "maxent",
+    results_dir: Path | None = None,
     **model_kwargs,
 ) -> Pipeline:
     """Train a species distribution model."""
@@ -108,7 +172,7 @@ def train_model(
     X = train_df[feature_cols].values
     y = train_df["presence"].values
 
-    X = np.nan_to_num(X, nan=np.nanmedian(X, axis=0))
+    X = impute_with_tracking(X, feature_cols, results_dir=results_dir)
 
     logger.info(f"Training {model_type} model")
     logger.info(f"  Features: {len(feature_cols)}")
