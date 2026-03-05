@@ -2,9 +2,10 @@ from __future__ import annotations
 
 """Download Western Pond Turtle occurrence records from GBIF.
 
-Uses the GBIF REST API to fetch Actinemys marmorata observations,
-filters to research-grade records in the Pacific Northwest, and
-applies spatial deduplication to reduce observer bias.
+Uses the GBIF REST API to fetch Actinemys marmorata and A. pallida
+observations (plus historical synonyms), filters to research-grade
+records in the Pacific Northwest, and applies spatial deduplication
+to reduce observer bias.
 """
 
 import argparse
@@ -22,11 +23,15 @@ logger = logging.getLogger(__name__)
 GBIF_API = "https://api.gbif.org/v1"
 
 # Western Pond Turtle species keys
-# Actinemys marmorata (current accepted name)
-# Also check Emys marmorata (former name)
+# Actinemys marmorata (current accepted name - northern species)
+# Actinemys pallida (southern species, recognized in 2019 taxonomic split)
+# Emys marmorata (former name pre-2001)
+# Clemmys marmorata (historical name)
 SPECIES_NAMES = [
     "Actinemys marmorata",
+    "Actinemys pallida",
     "Emys marmorata",
+    "Clemmys marmorata",
 ]
 
 # Pacific Northwest bounding box (OR, WA, Northern CA)
@@ -121,6 +126,7 @@ def parse_records(raw_records: list[dict]) -> pd.DataFrame:
         rows.append({
             "gbif_id": r.get("key"),
             "species": r.get("species", r.get("acceptedScientificName", "")),
+            "queried_name": r.get("_queried_name", ""),
             "latitude": lat,
             "longitude": lon,
             "coordinate_uncertainty_m": r.get("coordinateUncertaintyInMeters"),
@@ -253,13 +259,15 @@ def main():
     args.output_dir.mkdir(parents=True, exist_ok=True)
     region = REGIONS[args.region]
 
-    # Resolve species key
+    # Resolve species key and tag records with queried name for provenance
     all_records = []
     for name in SPECIES_NAMES:
         key = get_species_key(name)
         if key:
             logger.info(f"Found species key for {name}: {key}")
             records = fetch_all_occurrences(key, region)
+            for r in records:
+                r["_queried_name"] = name
             all_records.extend(records)
         else:
             logger.warning(f"No GBIF match for {name}")
