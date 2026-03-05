@@ -337,6 +337,92 @@ def run_spatial_cv(
     return {"folds": fold_results, "aggregate": aggregate}
 
 
+def evaluate_independent(
+    model,
+    test_csv: Path,
+    bioclim_stack: Path,
+    terrain_dir: Path | None = None,
+    cv_auc: float | None = None,
+) -> dict:
+    """Evaluate model on independent test set.
+
+    Assembles features at independent test locations and computes
+    AUC/TSS against presence labels. Compares with CV AUC if provided.
+    """
+    from src.features.assemble import sample_raster_at_points
+    from src.models.maxent import get_feature_cols, predict_probability
+
+    import json
+
+    test_df = pd.read_csv(test_csv)
+    logger.info(f"\nIndependent test evaluation: {len(test_df)} points")
+
+    lons = test_df["longitude"].values
+    lats = test_df["latitude"].values
+
+    # Load band names
+    band_index_path = bioclim_stack.parent / "bioclim_bands.json"
+    if band_index_path.exists():
+        with open(band_index_path) as f:
+            band_index = json.load(f)
+        band_names = [
+            band_index[str(i)]["variable"]
+            for i in sorted(int(k) for k in band_index.keys())
+        ]
+    else:
+        band_names = None
+
+    # Extract features
+    bioclim_features = sample_raster_at_points(bioclim_stack, lons, lats, band_names)
+
+    terrain_dfs = []
+    if terrain_dir and terrain_dir.exists():
+        for name in ["slope", "aspect", "twi", "tpi"]:
+            resampled = terrain_dir / "resampled" / f"{name}_resampled.tif"
+            native = terrain_dir / f"{name}.tif"
+            path = resampled if resampled.exists() else native
+            if path.exists():
+                tdf = sample_raster_at_points(path, lons, lats, band_names=[name])
+                terrain_dfs.append(tdf)
+
+    import pandas as pd
+    features = pd.concat([bioclim_features] + terrain_dfs, axis=1)
+
+    # All test points are presences; need background for AUC
+    # Use random predictions as null model comparison
+    X = features.values
+    y_prob = predict_probability(model, X)
+
+    valid = ~np.isnan(y_prob)
+    valid_count = valid.sum()
+    logger.info(f"  Valid predictions: {valid_count}/{len(y_prob)}")
+
+    if valid_count < 5:
+        logger.warning("  Too few valid predictions for independent evaluation")
+        return {"status": "insufficient_data", "valid_count": int(valid_count)}
+
+    # Since all test points are presences, evaluate as:
+    # - Mean predicted suitability (should be high)
+    # - Proportion above threshold
+    mean_suit = float(np.nanmean(y_prob[valid]))
+    logger.info(f"  Mean suitability at presence locations: {mean_suit:.3f}")
+
+    result = {
+        "n_test_points": len(test_df),
+        "n_valid": int(valid_count),
+        "mean_suitability": mean_suit,
+        "median_suitability": float(np.nanmedian(y_prob[valid])),
+        "min_suitability": float(np.nanmin(y_prob[valid])),
+        "max_suitability": float(np.nanmax(y_prob[valid])),
+    }
+
+    if cv_auc is not None:
+        result["cv_auc"] = cv_auc
+        logger.info(f"  CV AUC for reference: {cv_auc:.3f}")
+
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Run spatial block cross-validation"

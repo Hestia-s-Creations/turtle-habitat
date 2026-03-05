@@ -228,6 +228,100 @@ def download_target_group(
     return df
 
 
+def download_independent_test(
+    region: dict[str, str],
+    output_dir: Path,
+    training_csv: Path | None = None,
+    buffer_km: float = 5.0,
+) -> pd.DataFrame:
+    """Download iNaturalist research-grade observations as an independent test set.
+
+    Uses iNaturalist records via GBIF (datasetKey filter) to get observations
+    from a different data source than the main GBIF download. Applies spatial
+    buffer exclusion around training points to prevent leakage.
+    """
+    # iNaturalist Research-grade Observations dataset key on GBIF
+    INAT_DATASET_KEY = "50c9509d-22c7-4a22-a47d-8c48425ef4a7"
+
+    all_records = []
+    for name in SPECIES_NAMES:
+        key = get_species_key(name)
+        if not key:
+            continue
+        logger.info(f"Fetching iNaturalist records for {name}")
+
+        offset = 0
+        while True:
+            params = {
+                "taxonKey": key,
+                "datasetKey": INAT_DATASET_KEY,
+                "hasCoordinate": "true",
+                "hasGeospatialIssue": "false",
+                "limit": 300,
+                "offset": offset,
+                **region,
+            }
+            resp = requests.get(f"{GBIF_API}/occurrence/search", params=params)
+            resp.raise_for_status()
+            data = resp.json()
+            results = data.get("results", [])
+            all_records.extend(results)
+
+            if data.get("endOfRecords", True) or not results:
+                break
+            offset += 300
+            time.sleep(0.5)
+
+        logger.info(f"  {name}: {len(all_records)} iNaturalist records total")
+
+    df = parse_records(all_records)
+    if df.empty:
+        logger.warning("No iNaturalist records found for independent test set")
+        return df
+
+    # Apply coordinate uncertainty filter
+    if "coordinate_uncertainty_m" in df.columns:
+        before = len(df)
+        df = df[
+            df["coordinate_uncertainty_m"].isna()
+            | (df["coordinate_uncertainty_m"] <= 1000)
+        ]
+        logger.info(f"  Uncertainty filter: {before} -> {len(df)}")
+
+    # Deduplicate
+    df = df.drop_duplicates(subset=["gbif_id"])
+    df = spatial_deduplicate(df, resolution_km=1.0)
+
+    # Spatial buffer exclusion: remove test points within buffer_km of training points
+    if training_csv and training_csv.exists():
+        train = pd.read_csv(training_csv)
+        train_lons = train["longitude"].values
+        train_lats = train["latitude"].values
+
+        buffer_deg = buffer_km / 111.0  # approximate degrees
+        keep = []
+        for _, row in df.iterrows():
+            dists = ((train_lons - row["longitude"]) ** 2
+                     + (train_lats - row["latitude"]) ** 2) ** 0.5
+            if dists.min() > buffer_deg:
+                keep.append(True)
+            else:
+                keep.append(False)
+
+        before = len(df)
+        df = df[keep]
+        logger.info(
+            f"  Buffer exclusion ({buffer_km}km): {before} -> {len(df)} "
+            f"({before - len(df)} removed near training points)"
+        )
+
+    output_path = output_dir / "independent_test.csv"
+    df.to_csv(output_path, index=False)
+    logger.info(f"Saved {len(df)} independent test points to {output_path}")
+
+    return df
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Download Western Pond Turtle occurrences from GBIF"

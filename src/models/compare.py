@@ -14,7 +14,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from src.evaluation.spatial_cv import run_spatial_cv
+from src.evaluation.spatial_cv import run_spatial_cv, evaluate_independent
 from src.models.maxent import get_feature_cols, train_model, save_model, variable_importance
 from src.visualization.response_curves import generate_response_curves
 
@@ -25,6 +25,9 @@ def compare_models(
     training_data: Path,
     output_dir: Path,
     model_types: list[str] | None = None,
+    independent_test_csv: Path | None = None,
+    bioclim_stack: Path | None = None,
+    terrain_dir: Path | None = None,
 ) -> pd.DataFrame:
     """Run spatial CV for multiple model types and compare."""
     if model_types is None:
@@ -102,6 +105,22 @@ def compare_models(
         for w in warnings:
             logger.warning(f"  {w['feature']}: {w['warning']}")
 
+    # Independent test set evaluation
+    if independent_test_csv and independent_test_csv.exists() and bioclim_stack:
+        logger.info(f"\n{'=' * 60}")
+        logger.info(f"INDEPENDENT TEST SET EVALUATION")
+        logger.info(f"{'=' * 60}")
+        indep_results = evaluate_independent(
+            final_model,
+            independent_test_csv,
+            bioclim_stack,
+            terrain_dir=terrain_dir,
+            cv_auc=best_auc,
+        )
+        with open(output_dir / "independent_test_results.json", "w") as f:
+            json.dump(indep_results, f, indent=2, default=str)
+        logger.info(f"Independent test results saved")
+
     return comparison
 
 
@@ -110,6 +129,12 @@ def main():
     parser.add_argument("--training-data", type=Path, required=True)
     parser.add_argument("--model-types", nargs="+", default=["maxent", "rf", "gbm"])
     parser.add_argument("--output-dir", type=Path, default=Path("results/comparison"))
+    parser.add_argument("--independent-test", type=Path, default=None,
+                        help="CSV with independent test occurrences")
+    parser.add_argument("--bioclim-stack", type=Path, default=None,
+                        help="Bioclim GeoTIFF for extracting features at test points")
+    parser.add_argument("--terrain-dir", type=Path, default=None,
+                        help="Terrain directory for extracting features at test points")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -118,7 +143,12 @@ def main():
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
-    compare_models(args.training_data, args.output_dir, args.model_types)
+    compare_models(
+        args.training_data, args.output_dir, args.model_types,
+        independent_test_csv=args.independent_test,
+        bioclim_stack=args.bioclim_stack,
+        terrain_dir=args.terrain_dir,
+    )
 
 
 if __name__ == "__main__":
