@@ -202,6 +202,18 @@ def download_target_group(
 
     df = parse_records(all_records)
 
+    # Apply coordinate uncertainty filter matching turtle presence threshold (<=1km)
+    # This ensures symmetric spatial precision between presence and background points
+    if "coordinate_uncertainty_m" in df.columns:
+        before = len(df)
+        df = df[
+            df["coordinate_uncertainty_m"].isna()
+            | (df["coordinate_uncertainty_m"] <= 1000)
+        ]
+        logger.info(
+            f"  Filtered high-uncertainty background records: {before} -> {len(df)}"
+        )
+
     # Save raw
     output_path = output_dir / "target_group_background.csv"
     df.to_csv(output_path, index=False)
