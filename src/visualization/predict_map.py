@@ -32,7 +32,7 @@ def predict_raster(
     model, feature_cols = load_model(model_path)
 
     # Determine which bands come from bioclim vs terrain
-    bioclim_bands = []
+    bioclim_band_names = []
     terrain_paths = {}
 
     with rasterio.open(bioclim_stack) as src:
@@ -43,10 +43,12 @@ def predict_raster(
 
         for i in range(n_bioclim):
             desc = src.descriptions[i] if src.descriptions[i] else f"band_{i + 1}"
-            bioclim_bands.append(desc)
+            # Extract short name (e.g., "bio10" from "bio10: Mean Temperature...")
+            short_name = desc.split(":")[0].strip() if ":" in desc else desc
+            bioclim_band_names.append(short_name)
 
     # Check for terrain rasters
-    terrain_names = ["slope", "aspect", "twi"]
+    terrain_names = ["slope", "aspect", "twi", "tpi"]
     if terrain_dir and terrain_dir.exists():
         for name in terrain_names:
             resampled = terrain_dir / "resampled" / f"{name}_resampled.tif"
@@ -55,13 +57,23 @@ def predict_raster(
             if path.exists():
                 terrain_paths[name] = path
 
-    all_band_names = bioclim_bands + list(terrain_paths.keys())
-    n_total_bands = n_bioclim + len(terrain_paths)
+    all_band_names = bioclim_band_names + list(terrain_paths.keys())
+
+    # Map model's feature_cols to raster band indices
+    band_indices = []
+    for fc in feature_cols:
+        if fc in all_band_names:
+            band_indices.append(all_band_names.index(fc))
+        else:
+            logger.warning(f"  Feature '{fc}' not found in raster bands")
+
+    n_selected = len(band_indices)
 
     logger.info(f"Predicting suitability map")
     logger.info(f"  Raster size: {width} x {height}")
-    logger.info(f"  Feature bands: {n_total_bands}")
-    logger.info(f"  Model features expected: {len(feature_cols)}")
+    logger.info(f"  Available bands: {len(all_band_names)}")
+    logger.info(f"  Model features: {feature_cols}")
+    logger.info(f"  Selected {n_selected} bands from rasters")
 
     # Set up output
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -100,9 +112,12 @@ def predict_raster(
             else:
                 all_data = bioclim_data
 
+            # Select only the bands the model expects
+            selected_data = all_data[band_indices]
+
             # Reshape to (n_pixels, n_features)
             n_pixels = n_rows * width
-            X = all_data.reshape(n_total_bands, n_pixels).T
+            X = selected_data.reshape(n_selected, n_pixels).T
 
             # Predict
             probs = predict_probability(model, X)
